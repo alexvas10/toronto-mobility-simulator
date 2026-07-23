@@ -7,8 +7,9 @@ from src.config import RAW_DIR
 
 GTFS_DIR = RAW_DIR / "gtfs"
 
-MODE_NAMES = {0: "streetcar", 1: "subway"}
-MODE_COLORS = {"subway": "#1f1fb4", "streetcar": "#c0392b"}
+# GTFS route_type: 0 = streetcar/tram, 1 = subway, 3 = bus.
+MODE_NAMES = {0: "streetcar", 1: "subway", 3: "bus"}
+MODE_COLORS = {"subway": "#1f1fb4", "streetcar": "#c0392b", "bus": "#1e8449"}
 
 
 def load_transit_lines() -> pd.DataFrame:
@@ -35,9 +36,20 @@ def load_transit_lines() -> pd.DataFrame:
             {
                 "route_id": row["route_id"],
                 "mode": row["mode"],
-                "route_name": row.get("route_long_name") or row.get("route_short_name"),
+                "route_name": _route_label(row),
                 "lats": shape_points["shape_pt_lat"].tolist(),
                 "lons": shape_points["shape_pt_lon"].tolist(),
             }
         )
     return pd.DataFrame(rows)
+
+
+def _route_label(row: pd.Series) -> str:
+    """Prefer '29 Dufferin' (number + name) so bus routes are searchable by number."""
+    short = row.get("route_short_name")
+    long = row.get("route_long_name")
+    short = str(short).strip() if pd.notna(short) else ""
+    long = str(long).strip() if pd.notna(long) else ""
+    if short and long and short not in long:
+        return f"{short} {long}"
+    return long or short

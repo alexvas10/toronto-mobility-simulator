@@ -9,6 +9,8 @@ Built as a data-engineering and geospatial analysis project on real, messy open-
 ## What it does
 
 - **Choropleth map** of Toronto's 25 wards, coloured by predicted rideshare trip duration for your chosen scenario — on an OpenStreetMap basemap with TTC subway/streetcar lines and subway station markers overlaid from GTFS.
+- **Transit route overlays** — subway and streetcar lines toggle on together; all 200+ TTC bus routes are individually filterable via a searchable multiselect (off by default, so the map stays fast — pick routes by number or name).
+- **New-development overlays** — plot Toronto's *Development Applications* (proposed/approved rezonings, site plans, subdivisions) as points coloured by application type and filterable by planning status, plus an approximate per-ward count of *active building permits* (where construction is currently happening).
 - **XGBoost regressor** trained on time/weather/delay features, evaluated with a time-based holdout (not a shuffled split, to avoid future-data leakage).
 - **Isolation Forest anomaly detector** flags ward-hours that were unusual given their time-of-day, weather, and TTC-delay context — framed as association, not causation.
 - **SHAP waterfall** shows which features drove each ward's prediction.
@@ -32,6 +34,8 @@ All data is publicly available with no API key required.
 | [Toronto Open Data — TTC Delay Data](https://open.toronto.ca/dataset/ttc-subway-delay-data/) (subway, streetcar, bus, LRT) | Per-mode delay logs with cause codes and delay minutes | CKAN API, yearly XLSX + rolling CSV |
 | [Toronto Open Data — TTC Routes and Schedules (GTFS)](https://open.toronto.ca/dataset/ttc-routes-and-schedules/) | Station coordinates and transit line geometry for the map overlay | CKAN API, static GTFS zip |
 | [Toronto Open Data — City Wards](https://open.toronto.ca/dataset/city-wards/) | Ward boundary polygons (GeoJSON, WGS84) for the choropleth | CKAN API |
+| [Toronto Open Data — Development Applications](https://open.toronto.ca/dataset/development-applications/) | Proposed/approved planning decisions (rezonings, site plans, subdivisions) with projected X/Y and ward number | CKAN datastore CSV |
+| [Toronto Open Data — Building Permits (Active)](https://open.toronto.ca/dataset/building-permits-active-permits/) | ~211k currently-active building permits (no coordinates — aggregated to wards by postal FSA) | CKAN datastore CSV |
 | [Environment Canada — Climate Data](https://climate.weather.gc.ca/) | Hourly temperature, precipitation, and weather description (Toronto Pearson Intl A, station 51459) | HTTP bulk download, one file per month |
 
 **Geography note:** PTC trip data only has ward name/number — no lat/long or H3 granularity — so the map is a ward-level choropleth, not point clustering. Subway station coordinates come from GTFS and are used separately for delay-to-ward matching and the map overlay.
@@ -51,8 +55,10 @@ src/
   ingest_weather.py         # download Environment Canada hourly weather
   ingest_wards.py           # download ward boundary GeoJSON
   ingest_gtfs.py            # download TTC GTFS feed
+  ingest_development.py     # download Development Applications + Active Building Permits
   ttc_station_wards.py      # subway station → ward lookup via GTFS + fuzzy text match
-  transit_geometry.py       # subway/streetcar line geometry for the map overlay
+  transit_geometry.py       # subway/streetcar/bus line geometry for the map overlay
+  development_geo.py        # geolocate dev applications + aggregate permits to wards
   build_features.py         # join all sources → hourly ward fact table
   anomaly_model.py          # Isolation Forest anomaly detection
   forecast_model.py         # XGBoost regressor + time-based backtest
@@ -85,6 +91,7 @@ python -m src.ingest_ttc_delays   # TTC delay logs, all modes
 python -m src.ingest_weather      # Environment Canada hourly weather
 python -m src.ingest_wards        # Toronto ward boundary GeoJSON
 python -m src.ingest_gtfs         # TTC GTFS feed (stops, routes, shapes)
+python -m src.ingest_development  # Development Applications + Active Building Permits
 ```
 
 All downloads are idempotent — already-present files are skipped unless `force=True`.
@@ -121,6 +128,8 @@ streamlit run app.py
 **Why a time-based train/test split?** The last 60 days of data are held out. Random shuffling would leak future ward-hour observations into training through the `trips_total_last_week` lag feature. Time-based splitting mirrors real deployment conditions.
 
 **How are subway delays matched to wards?** TTC delay logs only give a free-text `Station` field (e.g. `"BATHURST STATION (ENTE"`, truncated). `src/ttc_station_wards.py` uses GTFS station coordinates spatially joined to ward polygons, then matches messy delay-log text to canonical station names via word-boundary regex (validated at ~99% row match rate on subway data, ~96% on LRT data). Streetcar/bus delays use intersection-style free text that isn't reliably geocodable, so those are counted city-wide rather than per-ward.
+
+**Why are building permits ward-level, not points?** The *Development Applications* dataset ships projected X/Y coordinates (NAD83 MTM zone 10, reprojected to WGS84) and a 25-ward number, so each application is drawn as its own point. The *Active Building Permits* dataset (~211k rows) has **no coordinates and no 25-ward field** — only a postal FSA. Permits are therefore assigned a ward via an FSA → dominant-ward lookup built from the Development Applications data, and shown as an approximate per-ward count rather than exact locations. A postal FSA can straddle ward boundaries, so this is a "where is construction concentrated" signal, not a precise map — flagged as such in the app.
 
 **OpenStreetMap basemap — no API key needed.** The map uses Plotly's `choropleth_map` with `map_style="open-street-map"`, which renders tiles directly from the OSM CDN.
 

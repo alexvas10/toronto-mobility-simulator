@@ -43,6 +43,15 @@ def find_resource(package_name: str, name_contains: str) -> dict:
     raise ValueError(f"No resource matching '{name_contains}' in package '{package_name}'")
 
 
+def datastore_resource(package_name: str) -> dict:
+    """Return the first datastore-backed resource in a package (the queryable/dumpable CSV)."""
+    pkg = package_show(package_name)
+    for resource in pkg["resources"]:
+        if resource.get("datastore_active"):
+            return resource
+    raise ValueError(f"No datastore-active resource in package '{package_name}'")
+
+
 def download_file(url: str, dest: Path, force: bool = False) -> Path:
     _validate_download_url(url)
     if dest.exists() and not force:

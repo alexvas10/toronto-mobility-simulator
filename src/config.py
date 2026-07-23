@@ -26,6 +26,19 @@ TTC_DELAY_PACKAGES = {
 WARD_BOUNDARY_PACKAGE = "city-wards"
 GTFS_PACKAGE = "ttc-routes-and-schedules"
 
+# Development pipeline datasets, for the "where is new construction happening" overlays.
+# Development Applications: proposed/approved planning decisions (rezonings, site plans,
+# subdivisions) -- has projected X/Y (EPSG:2952) and a 25-ward number, so it maps as points.
+# Building Permits (Active): permits currently in-progress -- large (~211k rows) but has NO
+# coordinates and no 25-ward field, only a postal FSA, so it's aggregated to wards via an
+# FSA -> dominant-ward lookup borrowed from the Development Applications data (see
+# src/development_geo.py). Both are on CKAN datastore, dumped as CSV.
+DEVELOPMENT_APPLICATIONS_PACKAGE = "development-applications"
+BUILDING_PERMITS_PACKAGE = "building-permits-active-permits"
+
+# Development Applications X/Y are NAD83 MTM zone 10 metres; reprojected to WGS84 for the map.
+DEVELOPMENT_XY_CRS = "EPSG:2952"
+
 # PTC trip-level zip archives are published one per year.
 PTC_TRIP_YEARS = range(2018, 2027)
 

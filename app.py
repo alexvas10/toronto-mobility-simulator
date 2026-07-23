@@ -15,9 +15,24 @@ import streamlit as st
 from xgboost import XGBRegressor
 
 from src.config import MODELS_DIR, PROCESSED_DIR, RAW_DIR
+from src.development_geo import (
+    ACTIVE_APPLICATION_STATUSES,
+    building_permit_statuses,
+    load_building_permit_ward_counts,
+    load_development_applications,
+)
 from src.forecast_model import FEATURE_COLUMNS
 from src.transit_geometry import MODE_COLORS, load_transit_lines
 from src.ttc_station_wards import station_points_with_delay_counts
+
+# Qualitative palette for development-application points, keyed by application type.
+APP_TYPE_COLORS = {
+    "Official Plan / Rezoning": "#8e44ad",
+    "Site Plan Approval": "#2980b9",
+    "Draft Plan of Condominium": "#d35400",
+    "Draft Plan of Subdivision": "#16a085",
+    "Part Lot Control": "#c0392b",
+}
 
 WARDS_PATH = RAW_DIR / "city_wards_4326.geojson"
 FACTS_PATH = PROCESSED_DIR / "hourly_ward_facts_with_anomalies.parquet"
@@ -58,6 +73,27 @@ def load_transit_overlay() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 @st.cache_data
+def load_dev_applications() -> pd.DataFrame:
+    return load_development_applications()
+
+
+@st.cache_data
+def load_permit_status_options() -> list[str]:
+    return building_permit_statuses()
+
+
+@st.cache_data
+def load_permit_counts(statuses: tuple[str, ...]) -> tuple[pd.DataFrame, int]:
+    return load_building_permit_ward_counts(set(statuses) if statuses else None)
+
+
+def _bus_sort_key(name: str) -> tuple[int, str]:
+    """Sort bus route labels ('29 Dufferin') by leading route number, then name."""
+    head = name.split(" ", 1)[0]
+    return (int(head) if head.isdigit() else 10**6, name)
+
+
+@st.cache_data
 def ward_hour_baseline(facts: pd.DataFrame) -> pd.DataFrame:
     """Historical median trips_total per (ward, hour, dayofweek), used as the lag
     feature when scoring a hypothetical scenario that has no real history of its own."""
@@ -81,6 +117,27 @@ def build_scenario_frame(wards: gpd.GeoDataFrame, baseline: pd.DataFrame, scenar
     return rows
 
 
+def add_route_lines(fig: go.Figure, rows: pd.DataFrame, mode: str) -> None:
+    """Draw one line + one mid-point label per transit route in `rows`."""
+    color = MODE_COLORS[mode]
+    for _, row in rows.iterrows():
+        fig.add_trace(
+            go.Scattermap(
+                lat=row["lats"], lon=row["lons"], mode="lines",
+                line=dict(width=3, color=color), name=row["route_name"],
+                legendgroup=mode, showlegend=False, hoverinfo="text", text=row["route_name"],
+            )
+        )
+        mid = len(row["lats"]) // 2
+        fig.add_trace(
+            go.Scattermap(
+                lat=[row["lats"][mid]], lon=[row["lons"][mid]], mode="text",
+                text=[row["route_name"]], textfont=dict(size=11, color=color),
+                hoverinfo="skip", showlegend=False,
+            )
+        )
+
+
 st.title("Toronto Urban Mobility & Transit-Delay Scenario Simulator")
 st.caption(
     "Historical scenario simulator -- not real-time. Predictions come from a model "
@@ -92,11 +149,45 @@ facts = load_facts()
 baseline = ward_hour_baseline(facts)
 model = load_model()
 transit_lines, station_points = load_transit_overlay()
+dev_apps = load_dev_applications()
+bus_route_options = sorted(
+    transit_lines.loc[transit_lines["mode"] == "bus", "route_name"], key=_bus_sort_key
+)
 
 with st.sidebar:
     st.header("Map layers")
     show_transit_lines = st.checkbox("Show subway/streetcar lines", value=True)
     show_delay_stations = st.checkbox("Show subway stations (sized by historical delay count)", value=True)
+
+    st.markdown("**Bus routes**")
+    selected_bus_routes = st.multiselect(
+        "Show bus routes (search by number or name)",
+        options=bus_route_options,
+        default=[],
+        help="All 200+ TTC bus routes are available. None are drawn until you pick some, "
+        "to keep the map fast and readable.",
+    )
+
+    st.markdown("**New development**")
+    show_dev_apps = st.checkbox("Show development applications", value=False)
+    dev_status_options = sorted(dev_apps["status"].dropna().unique())
+    dev_default_statuses = [s for s in dev_status_options if s in ACTIVE_APPLICATION_STATUSES]
+    dev_statuses = st.multiselect(
+        "Application status", dev_status_options, default=dev_default_statuses,
+        help="Defaults to in-progress decisions (under review / approved but not closed).",
+        disabled=not show_dev_apps,
+    )
+    dev_type_options = sorted(dev_apps["app_type_label"].dropna().unique())
+    dev_types = st.multiselect(
+        "Application type", dev_type_options, default=dev_type_options, disabled=not show_dev_apps,
+    )
+
+    show_permits = st.checkbox("Show active building permits (per ward)", value=False)
+    permit_status_options = load_permit_status_options()
+    permit_statuses = st.multiselect(
+        "Permit status (blank = all active permits)", permit_status_options, default=[],
+        disabled=not show_permits,
+    )
     st.divider()
     st.header("Scenario controls")
     day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -155,34 +246,58 @@ with col1:
     )
     fig.update_traces(marker_line_width=1.5, marker_line_color="black")
 
+    shown_modes = []
     if show_transit_lines:
-        for mode, group in transit_lines.groupby("mode"):
-            for i, row in group.iterrows():
-                fig.add_trace(
-                    go.Scattermap(
-                        lat=row["lats"], lon=row["lons"], mode="lines",
-                        line=dict(width=3, color=MODE_COLORS[mode]),
-                        name=row["route_name"], legendgroup=mode, showlegend=False,
-                        hoverinfo="text", text=row["route_name"],
-                    )
-                )
-                mid = len(row["lats"]) // 2
-                fig.add_trace(
-                    go.Scattermap(
-                        lat=[row["lats"][mid]], lon=[row["lons"][mid]], mode="text",
-                        text=[row["route_name"]],
-                        textfont=dict(size=11, color=MODE_COLORS[mode]),
-                        hoverinfo="skip", showlegend=False,
-                    )
-                )
-        # one dummy trace per mode just to carry a single legend entry
-        for mode, color in MODE_COLORS.items():
+        for mode in ("subway", "streetcar"):
+            add_route_lines(fig, transit_lines[transit_lines["mode"] == mode], mode)
+        shown_modes += ["subway", "streetcar"]
+    if selected_bus_routes:
+        buses = transit_lines[
+            (transit_lines["mode"] == "bus") & transit_lines["route_name"].isin(selected_bus_routes)
+        ]
+        add_route_lines(fig, buses, "bus")
+        shown_modes.append("bus")
+    # one dummy trace per shown mode just to carry a single legend entry
+    for mode in shown_modes:
+        fig.add_trace(
+            go.Scattermap(
+                lat=[None], lon=[None], mode="lines",
+                line=dict(width=3, color=MODE_COLORS[mode]), name=mode, showlegend=True,
+            )
+        )
+
+    if show_dev_apps:
+        shown = dev_apps[dev_apps["status"].isin(dev_statuses) & dev_apps["app_type_label"].isin(dev_types)]
+        for app_type_label, group in shown.groupby("app_type_label"):
+            hover = (
+                group["address"] + " — " + group["status"]
+                + " (Ward " + group["ward_num"].astype("Int64").astype(str) + ")"
+            )
             fig.add_trace(
                 go.Scattermap(
-                    lat=[None], lon=[None], mode="lines",
-                    line=dict(width=3, color=color), name=mode, showlegend=True,
+                    lat=group["lat"], lon=group["lon"], mode="markers",
+                    marker=dict(size=7, color=APP_TYPE_COLORS.get(app_type_label, "#555555")),
+                    text=hover, hoverinfo="text", name=app_type_label, showlegend=True,
                 )
             )
+
+    if show_permits:
+        permit_counts, n_unmatched = load_permit_counts(tuple(sorted(permit_statuses)))
+        ward_centroids = wards.copy()
+        ward_centroids["cx"] = ward_centroids.geometry.centroid.x
+        ward_centroids["cy"] = ward_centroids.geometry.centroid.y
+        pc = ward_centroids.merge(permit_counts, on="ward_num", how="left").fillna({"permit_count": 0})
+        fig.add_trace(
+            go.Scattermap(
+                lat=pc["cy"], lon=pc["cx"], mode="markers",
+                marker=dict(
+                    size=(pc["permit_count"].clip(lower=1)) ** 0.5 * 0.9,
+                    color="#1f3a5f", opacity=0.75,
+                ),
+                text=pc["AREA_NAME"] + ": " + pc["permit_count"].astype(int).astype(str) + " active permits",
+                hoverinfo="text", name="Active building permits", showlegend=True,
+            )
+        )
 
     if show_delay_stations:
         fig.add_trace(
@@ -199,6 +314,18 @@ with col1:
 
     fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=600)
     st.plotly_chart(fig, width="stretch")
+
+    if show_dev_apps:
+        st.caption(
+            "Each development-application dot is a proposed or approved project, coloured by "
+            "application type — this is where new city planning decisions are being made."
+        )
+    if show_permits:
+        st.caption(
+            f"Active building-permit counts are approximate: permits carry no coordinates, so "
+            f"each is assigned to a ward by its postal FSA ({n_unmatched:,} could not be mapped). "
+            "Bubble size is proportional to √(permit count), placed at the ward centroid."
+        )
 
 with col2:
     st.subheader("Predicted duration by ward")
